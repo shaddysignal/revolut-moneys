@@ -41,7 +41,7 @@ class TheTransferService(val database: Database[Transfer, Long], val accountServ
           accountService.unlockById(sourceAccountId)
           accountService.unlockById(destinationAccountId)
 
-          Future.fromTry(tryLockAndTransfer)
+          Future.fromTry(tryLockAndTransfer).flatten
         }
       }).getOrElse(Future { Failure(new Error(s"one of the accounts($srcOption, $dstOption) does not exist")) })
     }).flatten
