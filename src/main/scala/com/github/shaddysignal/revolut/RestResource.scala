@@ -1,6 +1,6 @@
 package com.github.shaddysignal.revolut
 
-import akka.http.scaladsl.server.{Directives, Route}
+import akka.http.scaladsl.server._
 import com.github.shaddysignal.revolut.model.{Account, Transfer}
 import com.github.shaddysignal.revolut.service.{AccountService, TransferService}
 import de.heikoseeberger.akkahttpargonaut.ArgonautSupport
@@ -45,7 +45,9 @@ class RestResource(val accountService: AccountService, val transferService: Tran
             }
           } ~ post {
             entity(as[Transfer]) { transfer =>
-              complete(transferService.create(transfer.sourceAccountId, transfer.destinationAccountId, transfer.amount))
+              if (transfer.amount < 0) failWith(new Error("amount should be >= 0"))
+              else
+                complete(transferService.create(transfer.sourceAccountId, transfer.destinationAccountId, transfer.amount))
             }
           }
         }

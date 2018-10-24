@@ -1,11 +1,13 @@
 package com.github.shaddysignal.revolut.service
 
+import java.util.NoSuchElementException
+
 import com.github.shaddysignal.revolut.model.Transfer
 import com.github.shaddysignal.revolut.repo.Database
 import org.slf4s.Logging
 
 import scala.concurrent.{ExecutionContext, Future}
-import scala.util.{Failure, Try}
+import scala.util.{Failure, Success, Try}
 
 class TheTransferService(val database: Database[Transfer, Long], val accountService: AccountService)
                         (implicit val executionContext: ExecutionContext) extends TransferService with Logging {
@@ -17,33 +19,38 @@ class TheTransferService(val database: Database[Transfer, Long], val accountServ
 
     (for (
       srcOption <- srcFuture;
-      dstOption <- dstFuture
-    ) yield {
-      (for (
-        src <- srcOption;
-        dst <- dstOption
-      ) yield {
-        if (src.amount < amount) Future { Failure(new Error(s"source account(${src.id}) doesn't have enough funds")) }
+      dstOption <- dstFuture;
+      src <- Future { srcOption.get };
+      dst <- Future { dstOption.get }
+    ) yield { // ensuring that accounts exist
+      val tryLockAndTransfer = for (
+        _ <- accountService.lockById(sourceAccountId);
+        _ <- accountService.lockById(destinationAccountId)
+      ) yield { // Locking accounts
+        if (src.amount < amount)
+          Future { Failure(new Error(s"source account(${src.id}) doesn't have enough funds")) }
         else {
-          val tryLockAndTransfer = for (
-            srcLockSuccessful <- accountService.lockById(sourceAccountId);
-            dstLockSuccessful <- accountService.lockById(destinationAccountId)
-          ) yield {
-            if (!srcLockSuccessful || !dstLockSuccessful)
-              Future { Failure(new Error(s"can't lock accounts(${src.id}, ${dst.id}) in question")) }
-            else {
-              accountService.update(src.copy(amount = src.amount - amount))
-              accountService.update(dst.copy(amount = dst.amount + amount))
-              database.create(Transfer(None, sourceAccountId, destinationAccountId, amount))
-            }
-          }
+          (for (
+            tryUpdateSrc <- accountService.update(src.copy(amount = src.amount - amount));
+            tryUpdateDst <- accountService.update(dst.copy(amount = dst.amount + amount));
+            _ <- Future.fromTry(tryUpdateSrc);
+            _ <- Future.fromTry(tryUpdateDst)
+          ) yield { // ensuring that updates successful
+            database.create(Transfer(None, sourceAccountId, destinationAccountId, amount))
+          }).flatten
+        }
+      }
 
+      Future.fromTry(tryLockAndTransfer).flatten.andThen({
+        case _ => {
           accountService.unlockById(sourceAccountId)
           accountService.unlockById(destinationAccountId)
-
-          Future.fromTry(tryLockAndTransfer).flatten
         }
-      }).getOrElse(Future { Failure(new Error(s"one of the accounts($srcOption, $dstOption) does not exist")) })
+      })
+    }).transform({
+      case Failure(_: NoSuchElementException) => Failure(new Error("one of the accounts does not exist"))
+      case f@Failure(_) => f
+      case s@Success(_) => s
     }).flatten
   }
 

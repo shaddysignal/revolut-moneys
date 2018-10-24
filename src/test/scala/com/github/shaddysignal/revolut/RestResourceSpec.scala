@@ -1,7 +1,9 @@
 package com.github.shaddysignal.revolut
 
 import akka.http.scaladsl.model.StatusCodes
-import akka.http.scaladsl.testkit.ScalatestRouteTest
+import akka.http.scaladsl.server.Route
+import akka.http.scaladsl.testkit.{RouteTestTimeout, ScalatestRouteTest}
+import akka.testkit.TestDuration
 import com.github.shaddysignal.revolut.model.{Account, Transfer}
 import com.github.shaddysignal.revolut.repo.{IdGenerator, RepoModule, SimpleIdGenerator}
 import com.github.shaddysignal.revolut.service.ServiceModule
@@ -12,6 +14,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Try
 
 class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
+
+  implicit val timeout = RouteTestTimeout(10.seconds dilated)
 
   trait Context extends WebMainModule with ServiceModule with RepoModule with ArgonautSupport {
     import argonaut.Argonaut._
@@ -35,12 +39,14 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
     val newAccount = Account(None, amount)
     val firstAccount = Account(Some(firstId), amount)
     val secondAccount = Account(Some(secondId), amount)
+    val invalidAccountJson = invalidAccount.asJson
     val newAccountJson = newAccount.asJson
     val firstAccountJson = firstAccount.asJson
     val secondAccountJson = secondAccount.asJson
 
     val invalidTransferSameAccount = Transfer(None, firstId, firstId, amount)
     val invalidTransferWithLargeAmount = Transfer(None, firstId, secondId, 2 * amount)
+    val invalidTransferWithNegativeAmount = Transfer(None, firstId, secondId, -amount)
     val newTransfer = Transfer(None, firstId, secondId, amount)
     val firstTransfer = Transfer(Some(firstId), firstId, secondId, amount)
     val secondTransfer = Transfer(Some(secondId), firstId, secondId, amount)
@@ -49,13 +55,14 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
     val secondTransferJson = secondTransfer.asJson
     val invalidTransferSameAccountJson = invalidTransferSameAccount.asJson
     val invalidTransferWithLargeAmountJson = invalidTransferWithLargeAmount.asJson
+    val invalidTransferWithNegativeAmountJson = invalidTransferWithNegativeAmount.asJson
 
 
     def setupAccountsInDatabase: Future[Seq[Try[Account]]] = {
       Future.sequence(
         Seq(
-          accountDatabase.create(newAccount),
-          accountDatabase.create(newAccount)
+          accountService.create(newAccount.amount),
+          accountService.create(newAccount.amount)
         )
       )
     }
@@ -63,8 +70,7 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
     def setupTransfersInDatabase: Future[Seq[Try[Transfer]]] = {
       Future.sequence(
         Seq(
-          transferDatabase.create(newTransfer),
-          transferDatabase.create(newTransfer)
+          transferService.create(newTransfer.sourceAccountId, newTransfer.destinationAccountId, newTransfer.amount)
         )
       )
     }
@@ -72,20 +78,20 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
     // Specifying generator for tests
     override def idGenerator: IdGenerator[Long] = new SimpleIdGenerator(0)
 
-    override implicit val executionContext: ExecutionContext = ExecutionContext.global
+    override val executionContext: ExecutionContext = ExecutionContext.global
   }
 
   "RestResource" can {
     "manage accounts" should {
       "successfully create account" in new Context {
-        Post("/accounts", newAccountJson) -> restResource.routes -> check {
+        Post("/api/accounts", newAccountJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
           responseAs[Account] shouldBe firstAccount
         }
       }
 
       "successfully create account ignoring incoming id" in new Context {
-        Post("/accounts", secondAccountJson) -> restResource.routes -> check {
+        Post("/api/accounts", secondAccountJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
 
           val response = responseAs[Account]
@@ -95,7 +101,7 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       }
 
       "return 500 when creating with invalid account" in new Context {
-        Post("/accounts", newAccount) -> restResource.routes -> check {
+        Post("/api/accounts", invalidAccountJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.InternalServerError
         }
       }
@@ -103,14 +109,14 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       "get account by id" in new Context {
         Await.result(setupAccountsInDatabase, 5 seconds)
 
-        Get(s"/accounts/$firstId") -> restResource.routes -> check {
+        Get(s"/api/accounts/$firstId") ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
           responseAs[Account] shouldBe firstAccount
         }
       }
 
       "return 404 for account that does not exist" in new Context {
-        Get(s"/accounts/$firstId") -> restResource.routes -> check {
+        Get(s"/api/accounts/$firstId") ~> Route.seal(restResource.routes) ~> check {
           status shouldBe StatusCodes.NotFound
         }
       }
@@ -118,9 +124,9 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       "get all accounts" in new Context {
         Await.result(setupAccountsInDatabase, 5 seconds)
 
-        Get("/accounts") -> restResource.routes -> check {
+        Get("/api/accounts") ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
-          responseAs[Seq[Account]] shouldBe Seq(firstAccount, secondAccount)
+          responseAs[Seq[Account]] should contain theSameElementsAs Seq(firstAccount, secondAccount)
         }
       }
     }
@@ -129,7 +135,9 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       "successfully create transfer" in new Context {
         Await.result(setupAccountsInDatabase, 5 seconds)
 
-        Post("/transfers", newTransferJson) -> restResource.routes -> check {
+        println(Await.result(accountService.get(1), 5 seconds))
+
+        Post("/api/transfers", newTransferJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
           responseAs[Transfer] shouldBe firstTransfer
         }
@@ -138,7 +146,7 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       "successfully create transfer ignoring incoming id" in new Context {
         Await.result(setupAccountsInDatabase, 5 seconds)
 
-        Post("/transfers", secondTransferJson) -> restResource.routes -> check {
+        Post("/api/transfers", secondTransferJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
 
           val response = responseAs[Transfer]
@@ -150,13 +158,13 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       "return 500 when creating transfer with same source and destination" in new Context {
         Await.result(setupAccountsInDatabase, 5 seconds)
 
-        Post("/transfers", invalidTransferSameAccountJson) -> restResource.routes -> check {
+        Post("/api/transfers", invalidTransferSameAccountJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.InternalServerError
         }
       }
 
       "return 500 when creating transfer with not existing accounts" in new Context {
-        Post("/transfers", newTransferJson) -> restResource.routes -> check {
+        Post("/api/transfers", newTransferJson) ~> restResource.routes ~> check {
           status shouldBe StatusCodes.InternalServerError
         }
       }
@@ -164,32 +172,42 @@ class RestResourceSpec extends BaseSpec with ScalatestRouteTest {
       "return 500 when creating transfer with too large amount" in new Context {
         Await.result(setupAccountsInDatabase, 5 seconds)
 
-        Post("/transfers", invalidTransferWithLargeAmountJson) -> restResource.routes -> check {
+        Post("/api/transfers", invalidTransferWithLargeAmountJson) ~> restResource.routes ~> check {
+          status shouldBe StatusCodes.InternalServerError
+        }
+      }
+
+      "return 500 when creatung transfer with negative amount" in new Context {
+        Await.result(setupAccountsInDatabase, 5 seconds)
+
+        Post("/api/transfers", invalidTransferWithNegativeAmountJson) ~> Route.seal(restResource.routes) ~> check {
           status shouldBe StatusCodes.InternalServerError
         }
       }
 
       "get transfer by id" in new Context {
+        Await.result(setupAccountsInDatabase, 5 seconds)
         Await.result(setupTransfersInDatabase, 5 seconds)
 
-        Get(s"/transfers/$firstId") -> restResource.routes -> check {
+        Get(s"/api/transfers/$firstId") ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
           responseAs[Transfer] shouldBe firstTransfer
         }
       }
 
       "return 404 for transfer that does not exist" in new Context {
-        Get(s"/transfers/$firstId") -> restResource.routes -> check {
+        Get(s"/api/transfers/$firstId") ~> Route.seal(restResource.routes) ~> check {
           status shouldBe StatusCodes.NotFound
         }
       }
 
       "get all transfers" in new Context {
+        Await.result(setupAccountsInDatabase, 5 seconds)
         Await.result(setupTransfersInDatabase, 5 seconds)
 
-        Get("/transfers") -> restResource.routes -> check {
+        Get("/api/transfers") ~> restResource.routes ~> check {
           status shouldBe StatusCodes.OK
-          responseAs[Seq[Transfer]] shouldBe Seq(firstTransfer, secondTransfer)
+          responseAs[Seq[Transfer]] should contain theSameElementsAs Seq(firstTransfer)
         }
       }
     }

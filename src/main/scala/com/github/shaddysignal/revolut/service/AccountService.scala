@@ -9,6 +9,6 @@ trait AccountService extends Service[Account, Long] {
   def create(amount: BigDecimal): Future[Try[Account]]
   def update(account: Account): Future[Try[Account]]
 
-  def lockById(id: Long): Try[Boolean]
+  def lockById(id: Long): Try[Unit]
   def unlockById(id: Long): Unit
 }
