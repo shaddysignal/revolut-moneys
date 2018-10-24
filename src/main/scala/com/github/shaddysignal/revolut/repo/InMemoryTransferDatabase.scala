@@ -2,13 +2,14 @@ package com.github.shaddysignal.revolut.repo
 
 import com.github.shaddysignal.revolut.model.Transfer
 
-import scala.collection.parallel.mutable
+import scala.collection.concurrent.TrieMap
+import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
 class InMemoryTransferDatabase(val idGenerator: IdGenerator[Long])
                               (implicit val executionContext: ExecutionContext) extends Database[Transfer, Long] {
-  private val transfers: mutable.ParHashMap[Long, Transfer] = mutable.ParHashMap()
+  private val transfers: mutable.Map[Long, Transfer] = TrieMap[Long, Transfer]()
 
   override def create(entity: Transfer): Future[Try[Transfer]] = Future {
     entity.id match {

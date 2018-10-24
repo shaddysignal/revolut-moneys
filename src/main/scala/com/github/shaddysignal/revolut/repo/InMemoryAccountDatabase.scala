@@ -1,14 +1,17 @@
 package com.github.shaddysignal.revolut.repo
 
+import java.util.concurrent.ConcurrentHashMap
+
 import com.github.shaddysignal.revolut.model.Account
 
-import scala.collection.parallel.mutable
+import scala.collection.mutable
+import scala.collection.concurrent.TrieMap
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success, Try}
 
 class InMemoryAccountDatabase(val idGenerator: IdGenerator[Long])
                              (implicit val executionContext: ExecutionContext) extends Database[Account, Long] {
-  private val accounts: mutable.ParHashMap[Long, Account] = mutable.ParHashMap()
+  private val accounts: mutable.Map[Long, Account] = TrieMap[Long, Account]()
 
   override def create(entity: Account): Future[Try[Account]] = Future {
     entity.id match {
